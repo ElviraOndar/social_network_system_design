@@ -1,0 +1,1037 @@
+openapi: 3.0.0
+
+info:
+  title: Travel Social Network API
+  description: REST API for a social network for travelers
+  version: 1.0.0
+
+tags:
+  - name: Users
+    description: User profiles and subscriptions
+
+  - name: Posts
+    description: Travel posts
+
+  - name: Comments
+    description: Comments for posts
+
+  - name: Reactions
+    description: Reactions to posts
+
+  - name: Feed
+    description: User feed
+
+  - name: Places
+    description: Travel places
+
+  - name: Media
+    description: Photo upload
+
+paths:
+
+  # --------------------------------------------------
+  # USERS
+  # --------------------------------------------------
+
+  /users/{user_id}:
+    get:
+      summary: Get user profile
+      description: Returns public information about a user
+      tags:
+        - Users
+
+      parameters:
+        - name: user_id
+          in: path
+          required: true
+          description: User identifier
+          schema:
+            type: integer
+
+      responses:
+        '200':
+          description: User profile
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/User'
+
+        '404':
+          description: User not found
+
+        '500':
+          description: Server error
+
+
+  /users/{user_id}/follow:
+    post:
+      summary: Follow user
+      description: Current user subscribes to another user
+      tags:
+        - Users
+
+      parameters:
+        - name: user_id
+          in: path
+          required: true
+          description: User to follow
+          schema:
+            type: integer
+
+      responses:
+        '201':
+          description: Successfully followed
+
+        '400':
+          description: Invalid request
+
+        '404':
+          description: User not found
+
+        '409':
+          description: Already following this user
+
+        '500':
+          description: Server error
+
+    delete:
+      summary: Unfollow user
+      description: Current user removes subscription to another user
+      tags:
+        - Users
+
+      parameters:
+        - name: user_id
+          in: path
+          required: true
+          description: User to unfollow
+          schema:
+            type: integer
+
+      responses:
+        '204':
+          description: Successfully unfollowed
+
+        '404':
+          description: User or subscription not found
+
+        '500':
+          description: Server error
+
+
+  /users/{user_id}/followers:
+    get:
+      summary: Get user followers
+      description: Returns users who follow the specified user
+      tags:
+        - Users
+
+      parameters:
+        - name: user_id
+          in: path
+          required: true
+          description: User identifier
+          schema:
+            type: integer
+
+        - name: limit
+          in: query
+          required: false
+          schema:
+            type: integer
+            default: 20
+            maximum: 100
+
+        - name: cursor
+          in: query
+          required: false
+          schema:
+            type: string
+
+      responses:
+        '200':
+          description: Followers list
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UserListResponse'
+
+        '404':
+          description: User not found
+
+        '500':
+          description: Server error
+
+
+  /users/{user_id}/following:
+    get:
+      summary: Get users followed by user
+      description: Returns users followed by the specified user
+      tags:
+        - Users
+
+      parameters:
+        - name: user_id
+          in: path
+          required: true
+          description: User identifier
+          schema:
+            type: integer
+
+        - name: limit
+          in: query
+          required: false
+          schema:
+            type: integer
+            default: 20
+            maximum: 100
+
+        - name: cursor
+          in: query
+          required: false
+          schema:
+            type: string
+
+      responses:
+        '200':
+          description: Following list
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UserListResponse'
+
+        '404':
+          description: User not found
+
+        '500':
+          description: Server error
+
+
+  # --------------------------------------------------
+  # POSTS
+  # --------------------------------------------------
+
+  /posts:
+    post:
+      summary: Create post
+      description: Creates a new travel post
+      tags:
+        - Posts
+
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreatePostRequest'
+
+            example:
+              text: "Amazing trip to Paris!"
+              place_id: 42
+              media_ids:
+                - "photo_123"
+                - "photo_124"
+
+      responses:
+        '201':
+          description: Post created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Post'
+
+        '400':
+          description: Invalid post data
+
+        '404':
+          description: Place not found
+
+        '500':
+          description: Server error
+
+
+    get:
+      summary: Get posts
+      description: Returns a paginated list of posts
+      tags:
+        - Posts
+
+      parameters:
+        - name: limit
+          in: query
+          required: false
+          description: Number of posts to return
+          schema:
+            type: integer
+            default: 20
+            maximum: 100
+
+        - name: cursor
+          in: query
+          required: false
+          description: Cursor for pagination
+          schema:
+            type: string
+
+      responses:
+        '200':
+          description: Posts list
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PostListResponse'
+
+        '500':
+          description: Server error
+
+
+  /posts/{post_id}:
+    get:
+      summary: Get post
+      description: Returns a single post
+      tags:
+        - Posts
+
+      parameters:
+        - name: post_id
+          in: path
+          required: true
+          description: Post identifier
+          schema:
+            type: integer
+
+      responses:
+        '200':
+          description: Post
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Post'
+
+        '404':
+          description: Post not found
+
+        '500':
+          description: Server error
+
+
+    patch:
+      summary: Update post
+      description: Updates a post created by the current user
+      tags:
+        - Posts
+
+      parameters:
+        - name: post_id
+          in: path
+          required: true
+          description: Post identifier
+          schema:
+            type: integer
+
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdatePostRequest'
+
+      responses:
+        '200':
+          description: Post updated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Post'
+
+        '400':
+          description: Invalid post data
+
+        '403':
+          description: User is not allowed to modify this post
+
+        '404':
+          description: Post not found
+
+        '500':
+          description: Server error
+
+
+    delete:
+      summary: Delete post
+      description: Deletes a post created by the current user
+      tags:
+        - Posts
+
+      parameters:
+        - name: post_id
+          in: path
+          required: true
+          description: Post identifier
+          schema:
+            type: integer
+
+      responses:
+        '204':
+          description: Post deleted
+
+        '403':
+          description: User is not allowed to delete this post
+
+        '404':
+          description: Post not found
+
+        '500':
+          description: Server error
+
+
+  # --------------------------------------------------
+  # COMMENTS
+  # --------------------------------------------------
+
+  /posts/{post_id}/comments:
+    get:
+      summary: Get post comments
+      description: Returns comments for a post
+      tags:
+        - Comments
+
+      parameters:
+        - name: post_id
+          in: path
+          required: true
+          description: Post identifier
+          schema:
+            type: integer
+
+        - name: limit
+          in: query
+          required: false
+          schema:
+            type: integer
+            default: 20
+            maximum: 100
+
+        - name: cursor
+          in: query
+          required: false
+          schema:
+            type: string
+
+      responses:
+        '200':
+          description: Comments list
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CommentListResponse'
+
+        '404':
+          description: Post not found
+
+        '500':
+          description: Server error
+
+
+    post:
+      summary: Add comment
+      description: Creates a comment for a post
+      tags:
+        - Comments
+
+      parameters:
+        - name: post_id
+          in: path
+          required: true
+          description: Post identifier
+          schema:
+            type: integer
+
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - text
+              properties:
+                text:
+                  type: string
+                  description: Comment text
+                  example: "Beautiful place!"
+
+      responses:
+        '201':
+          description: Comment created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Comment'
+
+        '400':
+          description: Invalid comment
+
+        '404':
+          description: Post not found
+
+        '500':
+          description: Server error
+
+
+  /comments/{comment_id}:
+    delete:
+      summary: Delete comment
+      description: Deletes a comment created by the current user
+      tags:
+        - Comments
+
+      parameters:
+        - name: comment_id
+          in: path
+          required: true
+          description: Comment identifier
+          schema:
+            type: integer
+
+      responses:
+        '204':
+          description: Comment deleted
+
+        '403':
+          description: User is not allowed to delete this comment
+
+        '404':
+          description: Comment not found
+
+        '500':
+          description: Server error
+
+
+  # --------------------------------------------------
+  # REACTIONS
+  # --------------------------------------------------
+
+  /posts/{post_id}/reaction:
+    post:
+      summary: Add reaction
+      description: Adds a reaction to a post
+      tags:
+        - Reactions
+
+      parameters:
+        - name: post_id
+          in: path
+          required: true
+          description: Post identifier
+          schema:
+            type: integer
+
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - type
+              properties:
+                type:
+                  type: string
+                  description: Reaction type
+                  example: "like"
+
+      responses:
+        '201':
+          description: Reaction created
+
+        '400':
+          description: Invalid reaction
+
+        '404':
+          description: Post not found
+
+        '409':
+          description: Reaction already exists
+
+        '500':
+          description: Server error
+
+
+    delete:
+      summary: Remove reaction
+      description: Removes the current user's reaction from a post
+      tags:
+        - Reactions
+
+      parameters:
+        - name: post_id
+          in: path
+          required: true
+          description: Post identifier
+          schema:
+            type: integer
+
+      responses:
+        '204':
+          description: Reaction removed
+
+        '404':
+          description: Reaction or post not found
+
+        '500':
+          description: Server error
+
+
+  # --------------------------------------------------
+  # FEED
+  # --------------------------------------------------
+
+  /feed:
+    get:
+      summary: Get user feed
+      description: Returns posts from users followed by the current user in reverse chronological order
+      tags:
+        - Feed
+
+      parameters:
+        - name: limit
+          in: query
+          required: false
+          description: Number of posts to return
+          schema:
+            type: integer
+            default: 20
+            maximum: 100
+
+        - name: cursor
+          in: query
+          required: false
+          description: Cursor for pagination
+          schema:
+            type: string
+
+      responses:
+        '200':
+          description: User feed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PostListResponse'
+
+        '500':
+          description: Server error
+
+
+  # --------------------------------------------------
+  # PLACES
+  # --------------------------------------------------
+
+  /places:
+    get:
+      summary: Search places
+      description: Searches popular travel places
+      tags:
+        - Places
+
+      parameters:
+        - name: query
+          in: query
+          required: true
+          description: Search query
+          schema:
+            type: string
+            example: "Paris"
+
+        - name: limit
+          in: query
+          required: false
+          schema:
+            type: integer
+            default: 20
+            maximum: 100
+
+        - name: cursor
+          in: query
+          required: false
+          schema:
+            type: string
+
+      responses:
+        '200':
+          description: Places list
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PlaceListResponse'
+
+        '400':
+          description: Search query is invalid
+
+        '500':
+          description: Server error
+
+
+  /places/{place_id}:
+    get:
+      summary: Get place
+      description: Returns information about a place
+      tags:
+        - Places
+
+      parameters:
+        - name: place_id
+          in: path
+          required: true
+          description: Place identifier
+          schema:
+            type: integer
+
+      responses:
+        '200':
+          description: Place
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Place'
+
+        '404':
+          description: Place not found
+
+        '500':
+          description: Server error
+
+
+  /places/{place_id}/posts:
+    get:
+      summary: Get posts for place
+      description: Returns posts associated with a place
+      tags:
+        - Places
+
+      parameters:
+        - name: place_id
+          in: path
+          required: true
+          description: Place identifier
+          schema:
+            type: integer
+
+        - name: limit
+          in: query
+          required: false
+          schema:
+            type: integer
+            default: 20
+            maximum: 100
+
+        - name: cursor
+          in: query
+          required: false
+          schema:
+            type: string
+
+      responses:
+        '200':
+          description: Posts for place
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PostListResponse'
+
+        '404':
+          description: Place not found
+
+        '500':
+          description: Server error
+
+
+  # --------------------------------------------------
+  # MEDIA
+  # --------------------------------------------------
+
+  /media/upload-url:
+    post:
+      summary: Get photo upload URL
+      description: Returns a pre-signed URL for uploading a photo to object storage
+      tags:
+        - Media
+
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - content_type
+              properties:
+                content_type:
+                  type: string
+                  description: MIME type of the photo
+                  example: "image/jpeg"
+
+      responses:
+        '201':
+          description: Upload URL created
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                  - media_id
+                  - upload_url
+                properties:
+                  media_id:
+                    type: string
+                    example: "photo_123"
+                  upload_url:
+                    type: string
+                    format: uri
+                    example: "https://storage.example.com/upload/..."
+
+        '400':
+          description: Invalid content type
+
+        '500':
+          description: Server error
+
+
+# --------------------------------------------------
+# SCHEMAS
+# --------------------------------------------------
+
+components:
+
+  schemas:
+
+    User:
+      type: object
+      required:
+        - id
+        - username
+      properties:
+        id:
+          type: integer
+          example: 123
+        username:
+          type: string
+          example: "elvira"
+        avatar_url:
+          type: string
+          format: uri
+          nullable: true
+          example: "https://cdn.example.com/avatar.jpg"
+
+
+    UserListResponse:
+      type: object
+      required:
+        - items
+        - next_cursor
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/User'
+        next_cursor:
+          type: string
+          nullable: true
+          example: "eyJpZCI6MTIzfQ=="
+
+
+    Post:
+      type: object
+      required:
+        - id
+        - author
+        - text
+        - photos
+        - place
+        - created_at
+        - reaction_count
+        - comment_count
+      properties:
+        id:
+          type: integer
+          example: 1001
+
+        author:
+          $ref: '#/components/schemas/User'
+
+        text:
+          type: string
+          maxLength: 2000
+          example: "My trip to Paris"
+
+        photos:
+          type: array
+          maxItems: 10
+          items:
+            type: string
+            format: uri
+          example:
+            - "https://cdn.example.com/photo1.jpg"
+            - "https://cdn.example.com/photo2.jpg"
+
+        place:
+          $ref: '#/components/schemas/Place'
+
+        reaction_count:
+          type: integer
+          example: 152
+
+        comment_count:
+          type: integer
+          example: 34
+
+        created_at:
+          type: string
+          format: date-time
+          example: "2026-09-20T12:30:00Z"
+
+
+    CreatePostRequest:
+      type: object
+      required:
+        - text
+        - place_id
+      properties:
+        text:
+          type: string
+          maxLength: 2000
+          description: Post text
+
+        place_id:
+          type: integer
+          description: Place associated with the post
+
+        media_ids:
+          type: array
+          maxItems: 10
+          items:
+            type: string
+          description: IDs of uploaded photos
+
+
+    UpdatePostRequest:
+      type: object
+      properties:
+        text:
+          type: string
+          maxLength: 2000
+
+        place_id:
+          type: integer
+
+        media_ids:
+          type: array
+          maxItems: 10
+          items:
+            type: string
+
+
+    PostListResponse:
+      type: object
+      required:
+        - items
+        - next_cursor
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/Post'
+
+        next_cursor:
+          type: string
+          nullable: true
+          example: "eyJjcmVhdGVkX2F0IjoiMjAyNi0wOS0yMFQxMjozMDowMFoifQ=="
+
+
+    Comment:
+      type: object
+      required:
+        - id
+        - author
+        - text
+        - created_at
+      properties:
+        id:
+          type: integer
+          example: 5001
+
+        author:
+          $ref: '#/components/schemas/User'
+
+        text:
+          type: string
+          example: "Beautiful place!"
+
+        created_at:
+          type: string
+          format: date-time
+          example: "2026-09-20T13:00:00Z"
+
+
+    CommentListResponse:
+      type: object
+      required:
+        - items
+        - next_cursor
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/Comment'
+
+        next_cursor:
+          type: string
+          nullable: true
+          example: "eyJpZCI6NTAwMX0="
+
+
+    Place:
+      type: object
+      required:
+        - id
+        - name
+        - country
+      properties:
+        id:
+          type: integer
+          example: 42
+
+        name:
+          type: string
+          example: "Paris"
+
+        country:
+          type: string
+          example: "France"
+
+        latitude:
+          type: number
+          format: double
+          example: 48.8566
+
+        longitude:
+          type: number
+          format: double
+          example: 2.3522
+
+
+    PlaceListResponse:
+      type: object
+      required:
+        - items
+        - next_cursor
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/Place'
+
+        next_cursor:
+          type: string
+          nullable: true
+          example: "eyJpZCI6NDJ9"
