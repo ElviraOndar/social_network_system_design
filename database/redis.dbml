@@ -1,0 +1,60 @@
+// Redis — кэш, не источник истины (источник истины — PostgreSQL).
+// Redis — key-value хранилище, поэтому DBML используется только для визуализации
+// структуры ключей. Реальная структура:
+//
+// post:{post_id}         HASH        TTL 7 дней
+// user:{user_id}         HASH        TTL 1 день
+// user_likes:{user_id}   SORTED SET  member = post_id, score = время лайка (unix ms)
+// login_attempts:{login} STRING      счётчик неудачных попыток входа, TTL 15 минут
+//
+// Получение страницы ленты (20 постов):
+//   1. Cassandra: 20 post_id из feed_by_user
+//   2. Redis: HGETALL post:{post_id} для 20 постов (pipeline); при промахе пост читается
+//      из PostgreSQL, а имя и аватар автора — из user:{user_id} (при промахе — из User Service)
+//   3. Redis: ZMSCORE user_likes:{user_id} post_id1 ... post_id20 — какие посты лайкнуты
+
+Table post_card_cache {
+  key varchar [pk, note: 'post:{post_id}']
+  user_id bigint [note: 'Автор поста']
+  author_name varchar(100) [note: 'users.display_name автора (денормализовано)']
+  author_avatar_key varchar(255) [note: 'users.avatar_key автора (денормализовано)']
+  place_id bigint
+  place_name varchar(255) [note: 'places.name (денормализовано)']
+  place_city varchar(255) [note: 'places.city (денормализовано)']
+  place_country varchar(100) [note: 'places.country (денормализовано)']
+  text varchar(2000)
+  created_at timestamp
+  photos varchar [note: 'JSON-массив [{original_key, preview_key}] в порядке position']
+  likes_count integer [note: 'HINCRBY при лайке']
+  comments_count integer [note: 'HINCRBY при комментарии']
+
+  Note: 'HASH, TTL 7 дней. Содержит всё, что нужно для объекта Post в API, кроме liked_by_me. Записывается при создании поста (write-through) и при cache miss. При PATCH поста карточка перезаписывается, при DELETE удаляется. При событии user.updated карточки постов автора за 7 дней обновляются.'
+}
+
+Table user_profile_cache {
+  key varchar [pk, note: 'user:{user_id}']
+  username varchar(32)
+  display_name varchar(100)
+  avatar_key varchar(255)
+
+  Note: 'HASH, TTL 1 день. Имя и аватар для карточек постов (при промахе) и для авторов комментариев. Обновляется по событию user.updated, при промахе читается из User Service.'
+}
+
+Table user_likes_cache {
+  key varchar [note: 'user_likes:{user_id}']
+  member bigint [note: 'post_id лайкнутого поста']
+  score bigint [note: 'Время лайка, unix ms']
+
+  Indexes {
+    (key, member) [pk]
+  }
+
+  Note: 'SORTED SET. Хранит лайки пользователя за последние 7 дней, более старые удаляются через ZREMRANGEBYSCORE. Для постов старше 7 дней проверка идёт в PostgreSQL по PK reactions (user_id, post_id).'
+}
+
+Table login_attempts {
+  key varchar [pk, note: 'login_attempts:{login} — login как в POST /tokens (username или email)']
+  value integer [note: 'INCR при неудачной попытке входа']
+
+  Note: 'STRING, TTL 15 минут (ставится при первой неудачной попытке). После 10 неудачных попыток POST /tokens отвечает 429 до истечения TTL. При успешном входе ключ удаляется.'
+}

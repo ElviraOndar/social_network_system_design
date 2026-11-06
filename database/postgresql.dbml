@@ -1,0 +1,125 @@
+// PostgreSQL — основное хранилище (source of truth) для постов, фото, лайков,
+// комментариев, подписок и мест.
+// Пользователи хранятся в отдельной базе User Service (data_model/user_service.dbml).
+// Поля user_id / follower_id / followee_id — внешние идентификаторы users.id,
+// поэтому внешних ключей на users здесь нет: базы разных сервисов не связаны.
+
+Project travel_social_network {
+  database_type: 'PostgreSQL'
+  Note: 'Социальная сеть для путешественников: посты, фото, лайки, комментарии, подписки, места'
+}
+
+Table places {
+  id bigserial [pk]
+  name varchar(255) [not null]
+  city varchar(255)
+  region varchar(255)
+  country varchar(100) [not null]
+  latitude decimal(9,6)
+  longitude decimal(9,6)
+  popularity bigint [not null, default: 0, note: 'Рейтинг популярности, пересчитывается фоновой задачей (по числу постов и лайков)']
+  created_at timestamptz [not null, default: `now()`]
+  updated_at timestamptz [not null, default: `now()`]
+
+  Note: 'Поиск по названию, городу и региону выполняется в OpenSearch (places_search). Изменения синхронизируются асинхронно.'
+}
+
+Table posts {
+  id bigserial [pk]
+  user_id bigint [not null, note: 'Автор поста, ID из User Service']
+  place_id bigint [not null, ref: > places.id]
+  text varchar(2000) [not null]
+  likes_count integer [not null, default: 0, note: 'Денормализованный счётчик лайков']
+  comments_count integer [not null, default: 0, note: 'Денормализованный счётчик комментариев']
+  created_at timestamptz [not null, default: `now()`]
+  updated_at timestamptz [not null, default: `now()`, note: 'Время последнего редактирования (PATCH /posts/{post_id})']
+
+  Indexes {
+    (user_id, created_at) [name: 'idx_posts_user_created', note: 'GET /posts?user_id= — свои посты и посты другого путешественника, сортировка DESC']
+    (place_id, created_at) [name: 'idx_posts_place_created', note: 'GET /posts?place_id= — посты места, сортировка DESC']
+  }
+
+  Note: '''
+  Удаление поста (DELETE /posts/{post_id}) — физическое: в одной транзакции удаляются строки
+  из post_photos, reactions, comments и posts. Файлы фото удаляются из S3 фоновой задачей,
+  карточка поста — из Redis. Записи в лентах Cassandra не чистятся: Feed Service пропускает
+  посты, которых больше нет, а старые записи вытесняются лимитом в 1000 на ленту.
+  '''
+}
+
+Table media_uploads {
+  id uuid [pk, note: 'media_id из POST /media; после прикрепления становится post_photos.id или частью users.avatar_key']
+  user_id bigint [not null, note: 'Кто загружает файл; прикрепить файл может только он']
+  content_type varchar(50) [not null, note: 'image/jpeg, image/png или image/webp']
+  status varchar(20) [not null, default: 'pending', note: 'pending — ссылка выдана; uploaded — файл загружен, preview создан']
+  created_at timestamptz [not null, default: `now()`]
+  expires_at timestamptz [not null, note: 'created_at + 24 часа']
+
+  Indexes {
+    expires_at [name: 'idx_media_uploads_expires', note: 'Поиск просроченных загрузок для очистки']
+  }
+
+  Note: '''
+  Загрузки, ещё не прикреплённые к посту или профилю.
+  1. POST /media создаёт строку (pending) и выдаёт pre-signed URL на ключ media/{id}/original.jpg.
+  2. Клиент загружает файл в S3. Событие от S3 запускает обработку: создаётся media/{id}/preview.jpg,
+     статус меняется на uploaded.
+  3. POST /posts проверяет, что все media_ids в статусе uploaded и принадлежат автору, и в одной
+     транзакции создаёт строки post_photos и удаляет строки media_uploads.
+     Для аватара то же делает User Service при PATCH /users/me.
+  4. Фоновая задача удаляет просроченные строки и их файлы в S3.
+  Строки живут меньше суток, поэтому таблица небольшая.
+  '''
+}
+
+Table post_photos {
+  id uuid [pk, note: 'media_id из POST /media (media_uploads.id), входит в ключ объекта в S3']
+  post_id bigint [not null, ref: > posts.id]
+  position smallint [not null, note: 'Порядок фото в посте: 1..10']
+  original_key varchar(255) [not null, note: 'media/{id}/original.jpg']
+  preview_key varchar(255) [not null, note: 'media/{id}/preview.jpg']
+  created_at timestamptz [not null, default: `now()`]
+
+  Indexes {
+    (post_id, position) [unique, name: 'uq_post_photos_post_position']
+  }
+
+  Note: 'Сами файлы лежат в Object Storage. Храним ключи объектов, а не полные URL: URL собирается из домена CDN и ключа.'
+}
+
+Table reactions {
+  user_id bigint [not null, note: 'Кто поставил лайк, ID из User Service']
+  post_id bigint [not null, ref: > posts.id]
+  created_at timestamptz [not null, default: `now()`]
+
+  Indexes {
+    (user_id, post_id) [pk, note: 'Один пользователь — один лайк на пост; проверка «лайкнул ли я» для страницы ленты']
+  }
+
+  Note: 'Тип реакции один — лайк, поэтому поля type нет. Количество лайков берётся из posts.likes_count, COUNT(*) не используется.'
+}
+
+Table comments {
+  id bigserial [pk]
+  post_id bigint [not null, ref: > posts.id]
+  user_id bigint [not null, note: 'Автор комментария, ID из User Service']
+  text text [not null]
+  created_at timestamptz [not null, default: `now()`]
+
+  Indexes {
+    (post_id, created_at) [name: 'idx_comments_post_created', note: 'Страница из 20 комментариев к посту']
+  }
+}
+
+Table subscriptions {
+  follower_id bigint [not null, note: 'Кто подписался']
+  followee_id bigint [not null, note: 'На кого подписались']
+  created_at timestamptz [not null, default: `now()`]
+
+  Indexes {
+    (follower_id, followee_id) [pk, note: 'Подписки пользователя, защита от дублей']
+    (followee_id, follower_id) [name: 'idx_subscriptions_followee', note: 'Подписчики автора — для fan-out в ленту']
+  }
+
+  Note: 'Отписка — удаление строки.'
+}

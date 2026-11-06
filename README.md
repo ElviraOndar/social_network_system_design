@@ -388,7 +388,407 @@ Peak API-трафик: 58 × 5 ≈ 290 КБ/с.
 | Places        |       ≈ 116 |    ≈ 580 |        ≈ 11,6 МБ/с |     ≈ 57,9 МБ/с |
 
 
+## Модель хранения данных
 
+| Хранилище | Данные | Файл |
+|---|---|---|
+| PostgreSQL (основная БД) | posts, post_photos, media_uploads, reactions, comments, subscriptions, places | `database/postgresql.dbml` |
+| PostgreSQL User Service | users, refresh_tokens | `database/user_service.dbml` |
+| Cassandra / ScyllaDB | feed_by_user — материализованная лента | `database/cassandra.dbml` |
+| OpenSearch | places_search — поиск мест | `database/opensearch.dbml` |
+| Redis | кэш карточек постов, профилей, лайков, попыток входа | `database/redis.dbml` |
+| Object Storage (S3) + CDN | оригиналы и preview фото, аватары | ключи `media/{media_id}/original.jpg`, `preview.jpg` |
+
+PostgreSQL — источник истины. Cassandra, OpenSearch и Redis строятся из него и могут быть восстановлены. Пользователи вынесены в отдельный сервис со своей базой, поэтому `user_id` в основной БД хранится без внешнего ключа. Для Cassandra, OpenSearch и Redis DBML используется только для визуализации: реальная схема (CQL, mapping, ключи) — в комментариях в начале файлов.
+
+### Схема хранилищ
+
+```mermaid
+flowchart TB
+    Client["Клиенты: mobile, web"]
+    CDN["CDN"]
+    GW["API Gateway"]
+
+    subgraph Services["Сервисы"]
+        US["User Service"]
+        PS["Post Service<br/>посты, фото, лайки,<br/>комментарии, подписки"]
+        FS["Feed Service"]
+        SS["Search Service"]
+    end
+
+    subgraph Storages["Хранилища"]
+        UDB[("PostgreSQL User Service<br/>users, refresh_tokens")]
+        PDB[("PostgreSQL основная БД<br/>source of truth")]
+        R[("Redis<br/>кэш")]
+        C[("Cassandra<br/>feed_by_user")]
+        OS[("OpenSearch<br/>places_search")]
+        S3[("Object Storage<br/>media/{media_id}/...")]
+    end
+
+    Client --> GW
+    Client -- "фото, аватары" --> CDN
+    CDN -- "cache miss" --> S3
+    Client -- "загрузка по pre-signed URL" --> S3
+
+    GW --> US & PS & FS & SS
+    US --> UDB
+    US -. "профили" .-> R
+    PS --> PDB
+    PS -. "карточки постов, лайки" .-> R
+    FS --> C
+    FS -. "карточки постов" .-> R
+    SS --> OS
+
+    PDB -- "fan-out постов" --> C
+    PDB -- "индексация мест" --> OS
+```
+
+Сплошные стрелки — запись и чтение источника данных, пунктирные — чтение и обновление кэша.
+
+### Основная БД (PostgreSQL)
+
+```mermaid
+erDiagram
+    places ||--o{ posts : "place_id"
+    posts ||--o{ post_photos : "post_id"
+    posts ||--o{ reactions : "post_id"
+    posts ||--o{ comments : "post_id"
+
+    places {
+        bigint id PK
+        varchar name
+        varchar city
+        varchar region
+        varchar country
+        decimal latitude
+        decimal longitude
+        bigint popularity
+        timestamptz created_at
+        timestamptz updated_at
+    }
+    posts {
+        bigint id PK
+        bigint user_id "автор, ID из User Service"
+        bigint place_id FK
+        varchar text "до 2000 символов"
+        integer likes_count
+        integer comments_count
+        timestamptz created_at
+        timestamptz updated_at
+    }
+    post_photos {
+        uuid id PK "media_id"
+        bigint post_id FK
+        smallint position "1..10"
+        varchar original_key
+        varchar preview_key
+        timestamptz created_at
+    }
+    media_uploads {
+        uuid id PK "media_id из POST /media"
+        bigint user_id
+        varchar content_type
+        varchar status "pending, uploaded"
+        timestamptz created_at
+        timestamptz expires_at
+    }
+    reactions {
+        bigint user_id PK
+        bigint post_id PK, FK
+        timestamptz created_at
+    }
+    comments {
+        bigint id PK
+        bigint post_id FK
+        bigint user_id
+        text text
+        timestamptz created_at
+    }
+    subscriptions {
+        bigint follower_id PK
+        bigint followee_id PK
+        timestamptz created_at
+    }
+```
+
+Индексы: `posts (user_id, created_at)`, `posts (place_id, created_at)`, `post_photos (post_id, position) unique`, `comments (post_id, created_at)`, `subscriptions (followee_id, follower_id)`, `media_uploads (expires_at)`.
+
+### User Service (PostgreSQL)
+
+```mermaid
+erDiagram
+    users ||--o{ refresh_tokens : "user_id"
+
+    users {
+        bigint id PK
+        varchar username UK
+        varchar email UK
+        varchar password_hash
+        varchar display_name
+        varchar avatar_key
+        varchar bio
+        timestamptz created_at
+        timestamptz updated_at
+    }
+    refresh_tokens {
+        uuid id PK "ID сессии, claim sid"
+        bigint user_id FK
+        varchar token_hash UK "SHA-256"
+        varchar user_agent
+        timestamptz expires_at
+        timestamptz revoked_at
+        timestamptz created_at
+    }
+```
+
+### Cassandra, OpenSearch, Redis
+
+```mermaid
+erDiagram
+    feed_by_user {
+        bigint user_id PK "partition key"
+        timestamp created_at PK "clustering key DESC"
+        bigint post_id PK "clustering key DESC"
+        bigint author_id
+    }
+    places_search {
+        long place_id PK "= places.id"
+        text name
+        text city
+        text region
+        keyword country
+        geo_point location
+        long popularity
+    }
+    redis_post_card {
+        string key PK "post:{post_id}, HASH, TTL 7 дней"
+        string author_name
+        string author_avatar_key
+        string place_name
+        string text
+        string photos "JSON"
+        int likes_count
+        int comments_count
+    }
+    redis_user_profile {
+        string key PK "user:{user_id}, HASH, TTL 1 день"
+        string username
+        string display_name
+        string avatar_key
+    }
+    redis_user_likes {
+        string key PK "user_likes:{user_id}, SORTED SET"
+        bigint member "post_id"
+        bigint score "время лайка"
+    }
+    redis_login_attempts {
+        string key PK "login_attempts:{login}, TTL 15 мин"
+        int value "неудачные попытки"
+    }
+```
+
+Полное описание полей — в `.dbml`-файлах в папке `database`.
+
+## Расчёт потребления дисков для хранения и обработки данных на 1 год
+
+| Тип | Объём | Операций ввода-вывода | Пропускная способность |
+|---|---|---|---|
+| SSD | 6 ТБ | 10 000 | 500 МБ/с |
+| HDD | 32 ТБ | 100 | 150 МБ/с |
+
+- IOPS и throughput считаются по пиковой нагрузке (Average × 5).
+- Одна логическая операция = одна операция ввода-вывода.
+- Репликация и шардирование не учитываются.
+- Карточки постов кэшируются в Redis, cache hit 95%: на диск PostgreSQL доходит 5% чтений постов.
+
+### Основная БД (PostgreSQL)
+
+#### Посты
+
+Читаются при отдаче ленты и страниц мест: 20 постов на страницу.
+
+Capacity = 1 000 000 постов/сутки × 5 КБ × 365 = 1 825 ГБ
+Iops (peak) = (11 575 лента + 580 места) × 20 × 5% (промахи кэша) + 60 (запись) = 12 215
+Traffic (peak) = 12 155 × 5 КБ = 61 МБ/с
+
+| Тип | Disks for Capacity | Disks for IOPS | Disks for Throughput | MAX |
+|---|---|---|---|---|
+| SSD | 1 | 2 | 1 | 2 |
+| HDD | 1 | 123 | 1 | 123 |
+
+Ограничивающий фактор — IOPS. Без кэша было бы 243 100 IOPS и 25 SSD.
+
+#### Фотографии (метаданные)
+
+Capacity = 3 000 000 фото/сутки × 200 Б × 365 = 219 ГБ
+Iops (peak) = 60 постов × 3 фото = 180
+Traffic (peak) = 180 × 200 Б ≈ 0,04 МБ/с
+
+| Тип | Disks for Capacity | Disks for IOPS | Disks for Throughput | MAX |
+|---|---|---|---|---|
+| SSD | 1 | 1 | 1 | 1 |
+| HDD | 1 | 2 | 1 | 2 |
+
+Читаются вместе с постом, отдельной нагрузки на чтение не дают.
+
+#### Незавершённые загрузки (media_uploads)
+
+Строка живёт от `POST /media` до прикрепления к посту, не дольше суток.
+
+Capacity = 3 000 000 загрузок/сутки × 150 Б < 1 ГБ
+Iops (peak) = 3 000 000 × 3 операции (вставка, смена статуса, удаление) / 86 400 × 5 = 520
+Traffic (peak) ≈ 0,08 МБ/с
+
+| Тип | Disks for Capacity | Disks for IOPS | Disks for Throughput | MAX |
+|---|---|---|---|---|
+| SSD | 1 | 1 | 1 | 1 |
+| HDD | 1 | 6 | 1 | 6 |
+
+#### Лайки
+
+Запись — вставка в `reactions` и обновление `posts.likes_count`. Чтение — проверка `liked_by_me` для постов старше 7 дней, которых нет в кэше лайков Redis.
+
+Capacity = 50 000 000 лайков/сутки × 100 Б × 365 = 1 825 ГБ
+Iops (peak) = 2 900 × 2 (запись) + 11 575 × 5% (чтение) = 6 380
+Traffic (peak) = 6 380 × 100 Б ≈ 0,6 МБ/с
+
+| Тип | Disks for Capacity | Disks for IOPS | Disks for Throughput | MAX |
+|---|---|---|---|---|
+| SSD | 1 | 1 | 1 | 1 |
+| HDD | 1 | 64 | 1 | 64 |
+
+#### Комментарии
+
+Capacity = 5 000 000 комментариев/сутки × 1 КБ × 365 = 1 825 ГБ
+Iops (peak) = 290 × 2 (запись + `comments_count`) + 2 900 (чтение) = 3 480
+Traffic (peak) = 2 900 × 20 КБ + 290 × 1 КБ ≈ 58 МБ/с
+
+| Тип | Disks for Capacity | Disks for IOPS | Disks for Throughput | MAX |
+|---|---|---|---|---|
+| SSD | 1 | 1 | 1 | 1 |
+| HDD | 1 | 35 | 1 | 35 |
+
+#### Подписки
+
+Число активных связей почти не растёт: 2 млн подписок и 2 млн отписок в сутки компенсируют друг друга. Подписчики читаются при рассылке нового поста по лентам.
+
+Capacity = 10 000 000 × 100 подписок × 60 Б + 2 индекса ≈ 140 ГБ
+Iops (peak) = 230 (подписки и отписки) + 60 (чтение подписчиков для fan-out) = 290
+Traffic (peak) = 60 × 100 подписчиков × 60 Б + 230 × 60 Б ≈ 0,4 МБ/с
+
+| Тип | Disks for Capacity | Disks for IOPS | Disks for Throughput | MAX |
+|---|---|---|---|---|
+| SSD | 1 | 1 | 1 | 1 |
+| HDD | 1 | 3 | 1 | 3 |
+
+#### Места
+
+Справочник около 1 000 000 мест, записи почти нет. Поиск идёт в OpenSearch, а название места денормализовано в карточку поста в Redis, поэтому нагрузки на чтение из PostgreSQL практически нет.
+
+Capacity = 1 000 000 × 1 КБ ≈ 1 ГБ
+Iops ≈ 0
+
+Достаточно места на общем диске основной БД.
+
+#### Итого по основной БД
+
+Все таблицы лежат в одном экземпляре PostgreSQL, поэтому объём и нагрузка суммируются.
+
+| Таблица | Capacity (год) | IOPS (peak) | Throughput (peak) |
+|---|---|---|---|
+| Посты | 1 825 ГБ | 12 215 | 61 МБ/с |
+| Фотографии | 219 ГБ | 180 | 0,04 МБ/с |
+| Загрузки | < 1 ГБ | 520 | 0,08 МБ/с |
+| Лайки | 1 825 ГБ | 6 380 | 0,6 МБ/с |
+| Комментарии | 1 825 ГБ | 3 480 | 58 МБ/с |
+| Подписки | 140 ГБ | 290 | 0,4 МБ/с |
+| Места | 1 ГБ | ≈ 0 | ≈ 0 |
+| **Всего** | **≈ 5,8 ТБ, с индексами и WAL (×1,5) ≈ 8,8 ТБ** | **23 065** | **≈ 120 МБ/с** |
+
+| Тип | Disks for Capacity | Disks for IOPS | Disks for Throughput | MAX |
+|---|---|---|---|---|
+| SSD | 2 | 3 | 1 | 3 |
+| HDD | 1 | 231 | 1 | 231 |
+
+**Основная БД → 3 SSD.** Ограничивающий фактор — IOPS.
+
+### User Service (PostgreSQL)
+
+Профили читаются в основном из Redis, на диск попадают промахи кэша (5%). Access-токен проверяется по подписи без базы, refresh-токены обновляются раз в 15 минут у каждого из 1 млн одновременных пользователей.
+
+Capacity = (10 000 000 × 1 КБ + 10 000 000 × 2 сессии × 200 Б) × 1,5 ≈ 21 ГБ
+Iops (peak) = (12 155 + 58 000) × 5% (профили) + 1 000 000 / 900 × 2 (токены) ≈ 5 730
+Traffic (peak) = 3 508 × 1 КБ + 2 222 × 200 Б ≈ 4 МБ/с
+
+| Тип | Disks for Capacity | Disks for IOPS | Disks for Throughput | MAX |
+|---|---|---|---|---|
+| SSD | 1 | 1 | 1 | 1 |
+| HDD | 1 | 58 | 1 | 58 |
+
+**User Service → 1 SSD.**
+
+### Лента (Cassandra / ScyllaDB)
+
+Для каждого пользователя хранятся последние 1000 записей по 32 Б. Запись — рассылка поста 100 подписчикам, чтение — страница ленты из одной партиции.
+
+Capacity = 10 000 000 × 1 000 × 32 Б × 2 (накладные расходы, compaction) ≈ 640 ГБ
+Iops (peak) = 5 785 (запись) + 11 575 (чтение) = 17 360
+Traffic (peak) = 5 785 × 32 Б + 11 575 × 20 × 32 Б ≈ 7,6 МБ/с
+
+| Тип | Disks for Capacity | Disks for IOPS | Disks for Throughput | MAX |
+|---|---|---|---|---|
+| SSD | 1 | 2 | 1 | 2 |
+| HDD | 1 | 174 | 1 | 174 |
+
+**Лента → 2 SSD.** Ограничивающий фактор — IOPS.
+
+### Поиск мест (OpenSearch)
+
+Capacity = 1 000 000 мест × 1 КБ × 2 (индекс) ≈ 2 ГБ
+Iops (peak) = 1 155
+Traffic (peak) = 1 155 × 5,5 КБ ≈ 6,4 МБ/с
+
+| Тип | Disks for Capacity | Disks for IOPS | Disks for Throughput | MAX |
+|---|---|---|---|---|
+| SSD | 1 | 1 | 1 | 1 |
+| HDD | 1 | 12 | 1 | 12 |
+
+**Поиск → 1 SSD.**
+
+### Фото (файлы в Object Storage)
+
+На каждое фото сохраняются оригинал (2 МБ) и preview (200 КБ), 3 фото на пост. Аватар — 200 КБ + preview 20 КБ. Чтение идёт через CDN, на диски хранилища попадают только промахи CDN, поэтому хранилище считается по записи и объёму.
+
+Capacity = 3 000 000 × (2 МБ + 200 КБ) × 365 + 10 000 000 × 220 КБ ≈ 2 411 ТБ
+Iops (peak) = 6 000 000 объектов/сутки / 86 400 × 5 ≈ 347
+Traffic (peak) = 6,6 ТБ/сутки / 86 400 × 5 ≈ 382 МБ/с
+
+| Тип | Disks for Capacity | Disks for IOPS | Disks for Throughput | MAX |
+|---|---|---|---|---|
+| SSD | 402 | 1 | 1 | 402 |
+| HDD | 76 | 4 | 3 | 76 |
+
+**Фото → 76 HDD.** Ограничивающий фактор — объём, поэтому выгоднее HDD.
+
+### Кэш (Redis)
+
+Данные в оперативной памяти, диски не нужны.
+
+RAM = 53 ГБ (карточки постов за 7 дней) + 3 ГБ (профили) + 22 ГБ (лайки за 7 дней) ≈ 78 ГБ
+Ops (peak) ≈ 331 000/с, один экземпляр — около 100 000/с → 4 экземпляра
+
+### Итого
+
+| Хранилище | Capacity (год) | IOPS (peak) | Throughput (peak) | Диски |
+|---|---|---|---|---|
+| PostgreSQL (основная БД) | 8,8 ТБ | 23 065 | 120 МБ/с | 3 SSD |
+| PostgreSQL (User Service) | 21 ГБ | 5 730 | 4 МБ/с | 1 SSD |
+| Cassandra | 640 ГБ | 17 360 | 7,6 МБ/с | 2 SSD |
+| OpenSearch | 2 ГБ | 1 155 | 6,4 МБ/с | 1 SSD |
+| Object Storage | 2 411 ТБ | 347 | 382 МБ/с | 76 HDD |
+| **Всего** | | | | **7 SSD + 76 HDD** |
+
+Плюс Redis: ≈ 78 ГБ RAM, 4 экземпляра.
 
 
 
