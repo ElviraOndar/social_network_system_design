@@ -1,4 +1,15 @@
 // Cassandra / ScyllaDB — Materialized Feed.
+//
+// Sharding:
+// - встроенное: consistent hashing по partition key user_id
+//   (Murmur3, кольцо токенов, виртуальные ноды num_tokens = 16)
+// - вся лента пользователя — одна партиция (~1000 строк × 32 Б ≈ 32 КБ)
+// Replication:
+// - master-less, replication factor 3 (NetworkTopologyStrategy, реплики в разных стойках)
+// - запись CONSISTENCY ONE, чтение CONSISTENCY ONE: W + R = 2 <= N = 3,
+//   строгой согласованности нет — для ленты это допустимо, её можно пересобрать из PostgreSQL
+// - расхождения реплик чинят hinted handoff, read repair и регулярный repair
+//
 // DBML не описывает Cassandra-специфичную схему, поэтому здесь он используется
 // только для визуализации. Реальная схема на CQL:
 //

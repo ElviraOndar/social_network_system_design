@@ -1,4 +1,12 @@
 // Redis — кэш, не источник истины (источник истины — PostgreSQL).
+//
+// Sharding:
+// - Redis Cluster: 16 384 hash slot'а, slot = CRC16(key) % 16384 (виртуальные шарды)
+// - 4 шарда (master), slot'ы распределены поровну, ~20 ГБ данных на шард
+// Replication:
+// - master-slave, асинхронная, у каждого master 1 реплика (replication factor 2)
+// - потеря последних записей при failover допустима: данные пересобираются из PostgreSQL
+//
 // Redis — key-value хранилище, поэтому DBML используется только для визуализации
 // структуры ключей. Реальная структура:
 //
@@ -6,6 +14,9 @@
 // user:{user_id}         HASH        TTL 1 день
 // user_likes:{user_id}   SORTED SET  member = post_id, score = время лайка (unix ms)
 // login_attempts:{login} STRING      счётчик неудачных попыток входа, TTL 15 минут
+// last_write:{user_id}   STRING      время последней записи пользователя, TTL 60 секунд:
+//                                    пока ключ есть, чтения этого пользователя идут
+//                                    с мастера PostgreSQL (чтение собственных записей)
 //
 // Получение страницы ленты (20 постов):
 //   1. Cassandra: 20 post_id из feed_by_user

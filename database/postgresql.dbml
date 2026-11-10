@@ -3,6 +3,44 @@
 // Пользователи хранятся в отдельной базе User Service (data_model/user_service.dbml).
 // Поля user_id / follower_id / followee_id — внешние идентификаторы users.id,
 // поэтому внешних ключей на users здесь нет: базы разных сервисов не связаны.
+//
+// Таблицы этого файла физически живут в двух кластерах PostgreSQL.
+//
+// Кластер content: posts, post_photos, media_uploads, reactions, comments (+ копия places)
+// Sharding:
+// - key based по автору поста: bucket = hash(user_id) % 1024 (виртуальные шарды)
+// - bucket -> физический шард по таблице соответствия в etcd; на первый год 2 шарда
+// - bucket зашит в posts.id, поэтому post_photos, reactions и comments лежат
+//   на шарде своего поста, а запрос по post_id сразу идёт в нужный шард
+// - media_uploads лежит на шарде загружающего пользователя (bucket по user_id)
+// - routing на стороне клиента: шардирующая библиотека в Post Service
+// - GET /posts?place_id= не привязан к автору: запрос идёт на все шарды,
+//   каждый отдаёт 20 последних постов места, Post Service сливает результаты
+// - решардинг: перенос целых бакетов логической репликацией, хэш не меняется
+// Replication:
+// - master-slave, физическая потоковая (WAL, push)
+// - replication factor 3: master + 1 semisync-реплика + 1 async-реплика
+// - копии шарда размещены в трёх разных стойках
+// - чтение с реплик (hot standby); чтение своих записей в течение 60 с — с мастера
+// - монотонное чтение: пользователь закреплён за одной репликой по hash(user_id)
+// - failover: Patroni + etcd, новым мастером становится semisync-реплика
+//
+// Кластер global: subscriptions, places (мастер-копия справочника)
+// Sharding:
+// - не используется: ~212 ГБ, почти не растёт, ~290 IOPS; подписки читаются и по
+//   подписчику, и по автору, при шардировании каждую связь пришлось бы хранить дважды
+// Replication:
+// - master-slave, физическая потоковая, replication factor 3: master + 1 semisync + 1 async
+// - places дополнительно копируется на каждый шард content логической репликацией
+//   (только эта таблица), чтобы внешний ключ posts.place_id проверялся локально
+//
+// Object Storage (файлы, на которые ссылаются post_photos и users.avatar_key)
+// Sharding:
+// - по хэшу ключа объекта (media_id — UUID): объекты равномерно распределены
+//   по виртуальным разделам, каждый раздел размещён на трёх дисках разных хостов
+// Replication:
+// - replication factor 3, синхронная: загрузка подтверждается после записи трёх копий
+//   в разных стойках
 
 Project travel_social_network {
   database_type: 'PostgreSQL'
@@ -10,7 +48,7 @@ Project travel_social_network {
 }
 
 Table places {
-  id bigserial [pk]
+  id bigserial [pk, note: 'Генерируется в кластере global, на шарды content приходит готовым']
   name varchar(255) [not null]
   city varchar(255)
   region varchar(255)
@@ -21,11 +59,14 @@ Table places {
   created_at timestamptz [not null, default: `now()`]
   updated_at timestamptz [not null, default: `now()`]
 
-  Note: 'Поиск по названию, городу и региону выполняется в OpenSearch (places_search). Изменения синхронизируются асинхронно.'
+  Note: '''
+  Кластер global (мастер-копия) + копия на каждом шарде content (логическая репликация).
+  Поиск по названию, городу и региону выполняется в OpenSearch (places_search). Изменения синхронизируются асинхронно.
+  '''
 }
 
 Table posts {
-  id bigserial [pk]
+  id bigint [pk, note: 'Генерируется функцией на шарде: 41 бит — время в мс, 10 бит — bucket автора, 13 бит — локальная последовательность шарда. Обычный bigserial не подходит: на разных шардах id совпадали бы']
   user_id bigint [not null, note: 'Автор поста, ID из User Service']
   place_id bigint [not null, ref: > places.id]
   text varchar(2000) [not null]
@@ -40,6 +81,7 @@ Table posts {
   }
 
   Note: '''
+  Кластер content, шард определяется bucket автора (hash(user_id) % 1024).
   Удаление поста (DELETE /posts/{post_id}) — физическое: в одной транзакции удаляются строки
   из post_photos, reactions, comments и posts. Файлы фото удаляются из S3 фоновой задачей,
   карточка поста — из Redis. Записи в лентах Cassandra не чистятся: Feed Service пропускает
@@ -60,6 +102,7 @@ Table media_uploads {
   }
 
   Note: '''
+  Кластер content, шард загружающего пользователя (bucket по user_id).
   Загрузки, ещё не прикреплённые к посту или профилю.
   1. POST /media создаёт строку (pending) и выдаёт pre-signed URL на ключ media/{id}/original.jpg.
   2. Клиент загружает файл в S3. Событие от S3 запускает обработку: создаётся media/{id}/preview.jpg,
@@ -84,7 +127,7 @@ Table post_photos {
     (post_id, position) [unique, name: 'uq_post_photos_post_position']
   }
 
-  Note: 'Сами файлы лежат в Object Storage. Храним ключи объектов, а не полные URL: URL собирается из домена CDN и ключа.'
+  Note: 'Кластер content, шард поста. Сами файлы лежат в Object Storage. Храним ключи объектов, а не полные URL: URL собирается из домена CDN и ключа.'
 }
 
 Table reactions {
@@ -96,11 +139,11 @@ Table reactions {
     (user_id, post_id) [pk, note: 'Один пользователь — один лайк на пост; проверка «лайкнул ли я» для страницы ленты']
   }
 
-  Note: 'Тип реакции один — лайк, поэтому поля type нет. Количество лайков берётся из posts.likes_count, COUNT(*) не используется.'
+  Note: 'Кластер content, шард поста: вставка лайка и обновление posts.likes_count остаются одной локальной транзакцией. Тип реакции один — лайк, поэтому поля type нет. Количество лайков берётся из posts.likes_count, COUNT(*) не используется.'
 }
 
 Table comments {
-  id bigserial [pk]
+  id bigint [pk, note: 'Генерируется так же, как posts.id']
   post_id bigint [not null, ref: > posts.id]
   user_id bigint [not null, note: 'Автор комментария, ID из User Service']
   text text [not null]
@@ -109,6 +152,8 @@ Table comments {
   Indexes {
     (post_id, created_at) [name: 'idx_comments_post_created', note: 'Страница из 20 комментариев к посту']
   }
+
+  Note: 'Кластер content, шард поста: вставка комментария и обновление posts.comments_count — одна локальная транзакция.'
 }
 
 Table subscriptions {
@@ -121,5 +166,5 @@ Table subscriptions {
     (followee_id, follower_id) [name: 'idx_subscriptions_followee', note: 'Подписчики автора — для fan-out в ленту']
   }
 
-  Note: 'Отписка — удаление строки.'
+  Note: 'Кластер global, не шардируется: два паттерна доступа (по подписчику и по автору) при шардировании потребовали бы хранить каждую связь дважды, а объём всего ~210 ГБ и почти не растёт. Отписка — удаление строки.'
 }
