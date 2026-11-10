@@ -2,6 +2,15 @@
 // User Service отвечает за регистрацию, аутентификацию и профили.
 // Остальные сервисы хранят user_id как внешний идентификатор без внешних ключей:
 // базы разных сервисов не связаны между собой (database per service).
+//
+// Sharding:
+// - не используется: ~21 ГБ данных и ~5 700 IOPS в пике помещаются на один SSD
+// Replication:
+// - master-slave, физическая потоковая (WAL, push)
+// - replication factor 3: master + 1 semisync-реплика + 1 async-реплика
+// - профили читаются с реплик; вход и обновление токенов — только мастер
+//   (rotation refresh-токена должна видеть последнее состояние строки)
+// - failover: Patroni + etcd
 
 Project user_service {
   database_type: 'PostgreSQL'
