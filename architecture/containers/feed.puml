@@ -1,0 +1,36 @@
+@startuml
+!include https://raw.githubusercontent.com/plantuml-stdlib/C4-PlantUML/master/C4_Container.puml
+
+title Level 2. Подсистема «Подписки и лента»
+
+Person(traveler, "Путешественник")
+Container(apiGateway, "API Gateway", "Nginx")
+ContainerQueue(eventBus, "Event Bus", "Kafka", "post.created, subscription.deleted")
+ContainerDb(cache, "Cache", "Redis Cluster", "Карточки постов за 7 дней, лайки пользователя")
+Container(postService, "Post Service", "Go", "Публикует post.created, отдаёт карточки постов")
+ContainerDb(globalDb, "Global DB", "PostgreSQL: master + semisync + async", "subscriptions")
+
+Boundary(feed, "Подписки и лента", "подсистема") {
+    Container(subscriptionService, "Subscription Service", "Go", "Подписки и отписки")
+    Container(fanoutWorker, "Feed Fan-out Worker", "Go", "Fan-out on write: кладёт новый пост в ленту каждого подписчика")
+    Container(feedService, "Feed Service", "Go", "Собирает страницу ленты из 20 постов")
+    ContainerDb(feedDb, "Feed DB", "Cassandra, RF = 3, partition key = user_id", "feed_by_user: последние 1000 id постов")
+}
+
+Rel(traveler, apiGateway, "Подписывается, отписывается, открывает ленту", "HTTPS, REST")
+Rel(apiGateway, subscriptionService, "/users/me/subscriptions", "REST")
+Rel(subscriptionService, globalDb, "Добавляет и удаляет связь подписки", "SQL")
+Rel(subscriptionService, eventBus, "Публикует subscription.deleted")
+
+Rel(postService, eventBus, "Публикует post.created")
+Rel(fanoutWorker, eventBus, "Читает post.created, subscription.deleted")
+Rel(fanoutWorker, globalDb, "Получает подписчиков автора (с реплики)", "SQL")
+Rel(fanoutWorker, feedDb, "Добавляет пост в ленты подписчиков; при отписке убирает посты автора", "CQL, CONSISTENCY ONE")
+
+Rel(apiGateway, feedService, "GET /feed", "REST")
+Rel(feedService, feedDb, "1. Читает 20 id постов из одной партиции", "CQL, CONSISTENCY ONE")
+Rel(feedService, cache, "2. Читает карточки постов и отметки «лайкнул ли я»", "RESP")
+Rel(feedService, postService, "3. Карточки при промахе кэша", "gRPC")
+
+SHOW_LEGEND()
+@enduml
