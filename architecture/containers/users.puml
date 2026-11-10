@@ -1,0 +1,26 @@
+@startuml
+!include https://raw.githubusercontent.com/plantuml-stdlib/C4-PlantUML/master/C4_Container.puml
+
+title Level 2. Подсистема «Пользователи»: регистрация, вход, профили
+
+Person(traveler, "Путешественник")
+Container(apiGateway, "API Gateway", "Nginx", "Проверяет подпись JWT без обращения к базе, ограничивает частоту запросов")
+ContainerQueue(eventBus, "Event Bus", "Kafka")
+ContainerDb(cache, "Cache", "Redis Cluster", "user:{user_id}, login_attempts:{login}")
+Container(postService, "Post Service", "Go", "Хранит в карточках постов имя и аватар автора")
+
+Boundary(users, "Пользователи", "подсистема") {
+    Container(userService, "User Service", "Go", "Регистрация, вход, обновление и отзыв токенов, профили")
+    ContainerDb(userDb, "User DB", "PostgreSQL: master + semisync + async", "users, refresh_tokens")
+}
+
+Rel(traveler, apiGateway, "Регистрируется, входит, редактирует профиль", "HTTPS, REST")
+Rel(apiGateway, userService, "/users, /users/me, /tokens", "REST")
+Rel(userService, userDb, "Пишет и обновляет токены на мастере, читает профили с реплик", "SQL")
+Rel(userService, cache, "Кэширует профили, считает неудачные попытки входа", "RESP")
+Rel(userService, eventBus, "Публикует user.updated при смене имени или аватара")
+Rel(postService, eventBus, "Читает user.updated")
+Rel(postService, cache, "Обновляет имя и аватар в карточках постов автора", "RESP")
+
+SHOW_LEGEND()
+@enduml

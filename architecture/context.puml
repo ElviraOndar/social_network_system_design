@@ -1,0 +1,19 @@
+@startuml
+!include https://raw.githubusercontent.com/plantuml-stdlib/C4-PlantUML/master/C4_Context.puml
+
+title Level 1. System context diagram — социальная сеть для путешественников
+
+Person(traveler, "Путешественник", "Публикует посты из путешествий, читает ленту, ставит лайки, комментирует, подписывается, ищет места")
+
+System(socialNetwork, "Социальная сеть для путешественников", "Посты с фото и привязкой к месту, лента подписок, лайки, комментарии, поиск популярных мест")
+
+System_Ext(cdn, "CDN", "Доставляет фото и аватары с серверов рядом с пользователем")
+System_Ext(placesSource, "Внешний источник мест", "OpenStreetMap: достопримечательности, природные объекты, точки интереса")
+
+Rel(traveler, socialNetwork, "Публикует посты, читает ленту, ставит лайки, комментирует, ищет места", "HTTPS, REST")
+Rel(traveler, cdn, "Загружает фото и аватары", "HTTPS")
+Rel(cdn, socialNetwork, "Забирает файлы при промахе кэша", "HTTPS")
+Rel(socialNetwork, placesSource, "Импортирует справочник мест", "HTTPS")
+
+SHOW_LEGEND()
+@enduml

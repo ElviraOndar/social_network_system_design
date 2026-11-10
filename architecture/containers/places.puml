@@ -1,0 +1,33 @@
+@startuml
+!include https://raw.githubusercontent.com/plantuml-stdlib/C4-PlantUML/master/C4_Container.puml
+
+title Level 2. Подсистема «Места и поиск»
+
+Person(traveler, "Путешественник")
+System_Ext(placesSource, "Внешний источник мест", "OpenStreetMap")
+Container(apiGateway, "API Gateway", "Nginx")
+ContainerQueue(eventBus, "Event Bus", "Kafka", "place.updated")
+Container(postService, "Post Service", "Go", "Посты места: GET /posts?place_id — запрос на все шарды, слияние результатов")
+ContainerDb(contentDb, "Content DB", "PostgreSQL, 2 шарда", "Копия places на каждом шарде")
+
+Boundary(places, "Места и поиск", "подсистема") {
+    Container(placesService, "Places Service", "Go", "Поиск мест, страница места, импорт справочника, пересчёт популярности раз в сутки")
+    Container(searchIndexer, "Search Indexer", "Go", "Переносит изменения мест в поисковый индекс")
+    ContainerDb(globalDb, "Global DB", "PostgreSQL: master + semisync + async", "places — источник истины для мест")
+    ContainerDb(searchDb, "Search Index", "OpenSearch: 1 шард × 3 копии", "places_search")
+}
+
+Rel(traveler, apiGateway, "Ищет места по городу и региону, открывает страницу места", "HTTPS, REST")
+Rel(apiGateway, placesService, "GET /places, GET /places/{id}", "REST")
+Rel(apiGateway, postService, "GET /posts?place_id=", "REST")
+Rel(placesService, searchDb, "Ищет 10 популярных мест", "HTTP")
+Rel(placesService, globalDb, "Читает место, записывает импорт и популярность", "SQL")
+Rel(placesService, placesSource, "Импортирует справочник", "HTTPS")
+Rel(placesService, postService, "Получает число постов и лайков по местам для популярности", "gRPC")
+Rel(placesService, eventBus, "Публикует place.updated")
+Rel(searchIndexer, eventBus, "Читает place.updated")
+Rel(searchIndexer, searchDb, "Обновляет документ места", "HTTP")
+Rel(globalDb, contentDb, "Копия places на каждый шард", "логическая репликация")
+
+SHOW_LEGEND()
+@enduml

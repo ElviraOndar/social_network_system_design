@@ -1,0 +1,38 @@
+@startuml
+!include https://raw.githubusercontent.com/plantuml-stdlib/C4-PlantUML/master/C4_Container.puml
+
+title Level 2. Подсистема «Контент»: посты, фото, лайки, комментарии
+
+Person(traveler, "Путешественник")
+Container(clientApps, "Клиентские приложения", "iOS, Android, Web SPA")
+System_Ext(cdn, "CDN", "Отдаёт фото и аватары")
+Container(apiGateway, "API Gateway", "Nginx")
+ContainerQueue(eventBus, "Event Bus", "Kafka")
+ContainerDb(cache, "Cache", "Redis Cluster", "post:{post_id}, user_likes:{user_id}, last_write:{user_id}")
+Container(fanoutWorker, "Feed Fan-out Worker", "Go", "Подсистема «Подписки и лента»")
+ContainerDb(globalDb, "Global DB", "PostgreSQL", "Мастер-копия справочника places")
+
+Boundary(content, "Контент", "подсистема") {
+    Container(postService, "Post Service", "Go", "Посты, лайки, комментарии, ссылки на загрузку. Шард = bucket автора, hash(user_id) % 1024")
+    Container(mediaProcessor, "Media Processor", "Go", "Делает preview для каждого загруженного фото")
+    ContainerDb(contentDb, "Content DB", "PostgreSQL: 2 шарда × (master + semisync + async)", "posts, post_photos, media_uploads, reactions, comments + копия places")
+    ContainerDb(objectStorage, "Object Storage", "S3-совместимое, RF = 3", "media/{media_id}/original.jpg, preview.jpg")
+}
+
+Rel(traveler, clientApps, "Пользуется")
+Rel(clientApps, apiGateway, "1. POST /media; 4. POST /posts; лайки, комментарии, GET /posts", "HTTPS, REST")
+Rel(apiGateway, postService, "Все запросы контента", "REST")
+Rel(clientApps, objectStorage, "2. Загружает фото по pre-signed URL", "HTTPS")
+Rel(objectStorage, eventBus, "3. media.uploaded")
+Rel(mediaProcessor, eventBus, "Читает media.uploaded, публикует media.processed")
+Rel(mediaProcessor, objectStorage, "Читает оригинал, сохраняет preview", "S3 API")
+Rel(postService, eventBus, "Читает media.processed; 5. публикует post.created")
+Rel(postService, contentDb, "Пост + фото, лайк + likes_count, комментарий + comments_count — одной транзакцией в шарде поста", "SQL")
+Rel(postService, cache, "Записывает карточку нового поста, обновляет счётчики и лайки", "RESP")
+Rel(fanoutWorker, eventBus, "Читает post.created")
+Rel(globalDb, contentDb, "Копия places на каждый шард", "логическая репликация")
+Rel(clientApps, cdn, "Загружает фото для показа", "HTTPS")
+Rel(cdn, objectStorage, "Забирает файл при промахе кэша", "HTTPS")
+
+SHOW_LEGEND()
+@enduml

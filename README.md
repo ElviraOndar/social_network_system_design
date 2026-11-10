@@ -143,11 +143,126 @@
 **SLO:** 99,95% доступности в месяц
 
 
-## Архитектура нашей системы
+## Архитектура системы
 
-![Архитектура системы](images/architecture_new.png)
+Архитектура описана по модели [C4](https://c4model.com/) на двух уровнях: контекст системы (Level 1) и контейнеры (Level 2). Диаграммы построены с помощью [C4-PlantUML](https://github.com/plantuml-stdlib/C4-PlantUML). Исходники лежат в папке `architecture/`, отрисованные SVG — в `images/diagrams/`.
 
-    
+<p align="center">
+    </br><b>Level 1.</b> System context diagram</br></br>
+</p>
+
+<p align="center">
+  <img src="images/diagrams/context.svg" />
+</p>
+
+<p align="center">
+    </br><b>Level 2.</b> Container diagram — общая схема</br></br>
+</p>
+
+<p align="center">
+  <img src="images/diagrams/container.svg" />
+</p>
+
+Общая схема показывает все контейнеры системы и связи между ними. Чтобы потоки данных было легче читать, ниже та же система разобрана по подсистемам.
+
+<p align="center">
+    </br><b>Level 2.</b> Подсистема «Пользователи»</br></br>
+</p>
+
+<p align="center">
+  <img src="images/diagrams/containers/users.svg" />
+</p>
+
+<p align="center">
+    </br><b>Level 2.</b> Подсистема «Контент»</br></br>
+</p>
+
+<p align="center">
+  <img src="images/diagrams/containers/content.svg" />
+</p>
+
+<p align="center">
+    </br><b>Level 2.</b> Подсистема «Подписки и лента»</br></br>
+</p>
+
+<p align="center">
+  <img src="images/diagrams/containers/feed.svg" />
+</p>
+
+<p align="center">
+    </br><b>Level 2.</b> Подсистема «Места и поиск»</br></br>
+</p>
+
+<p align="center">
+  <img src="images/diagrams/containers/places.svg" />
+</p>
+
+### Контейнеры
+
+| Контейнер | Технология | Ответственность |
+|---|---|---|
+| Клиентские приложения | iOS, Android, Web SPA | Интерфейс пользователя |
+| API Gateway | Nginx | TLS, балансировка, проверка JWT, rate limiting, маршрутизация по сервисам |
+| User Service | Go | Регистрация, вход, токены, профили |
+| Post Service | Go | Посты, фото, лайки, комментарии, ссылки на загрузку медиа |
+| Subscription Service | Go | Подписки и отписки |
+| Feed Service | Go | Страница ленты |
+| Places Service | Go | Поиск мест, страница места, импорт справочника, популярность |
+| Feed Fan-out Worker | Go | Раскладывает новые посты по лентам подписчиков |
+| Media Processor | Go | Создаёт preview фотографий |
+| Search Indexer | Go | Обновляет поисковый индекс мест |
+| Event Bus | Kafka | Асинхронные события между сервисами |
+| User DB | PostgreSQL | users, refresh_tokens |
+| Content DB | PostgreSQL, 2 шарда | posts, post_photos, media_uploads, reactions, comments |
+| Global DB | PostgreSQL | subscriptions, places |
+| Cache | Redis Cluster | Карточки постов, профили, лайки, попытки входа |
+| Feed DB | Cassandra | Материализованная лента |
+| Search Index | OpenSearch | Поисковый индекс мест |
+| Object Storage | S3-совместимое | Фото и аватары |
+
+Каждый сервис работает только со своими хранилищами. Если сервису нужны чужие данные, он обращается к сервису-владельцу (например, Feed Service получает карточки постов у Post Service) или получает событие из Kafka.
+
+### Как данные двигаются по системе
+
+**Публикация поста**
+1. Клиент запрашивает `POST /media` → Post Service создаёт запись в `media_uploads` и возвращает pre-signed URL.
+2. Клиент загружает фото напрямую в Object Storage, минуя сервисы.
+3. Object Storage публикует `media.uploaded` → Media Processor создаёт preview и публикует `media.processed` → Post Service отмечает загрузку готовой.
+4. Клиент отправляет `POST /posts` → Post Service в одной транзакции записывает пост и фото в шард автора, кладёт карточку поста в Redis и публикует `post.created`.
+5. Feed Fan-out Worker читает `post.created`, получает подписчиков автора из Global DB и добавляет пост в ленту каждого подписчика в Cassandra.
+
+**Просмотр ленты**
+1. `GET /feed` → Feed Service читает 20 id постов из партиции пользователя в Cassandra.
+2. Карточки постов и отметки «лайкнул ли я» берутся из Redis.
+3. При промахе кэша Feed Service запрашивает карточки у Post Service, который читает их из Content DB.
+4. Фото клиент загружает через CDN; при промахе CDN забирает файл из Object Storage.
+
+**Лайк и комментарий**
+Post Service в одной транзакции на шарде поста записывает лайк (комментарий) и увеличивает счётчик в `posts`, затем обновляет счётчик в карточке поста в Redis.
+
+**Подписка и отписка**
+Subscription Service записывает связь в Global DB. При отписке публикуется `subscription.deleted`, и Feed Fan-out Worker убирает посты автора из ленты пользователя.
+
+**Поиск мест и страница места**
+1. `GET /places?query=` → Places Service ищет 10 самых популярных мест в OpenSearch.
+2. `GET /places/{id}` → Places Service читает место из Global DB.
+3. `GET /posts?place_id=` → Post Service опрашивает оба шарда Content DB и сливает результаты.
+4. Справочник мест импортируется из OpenStreetMap, популярность пересчитывается раз в сутки. Изменения публикуются как `place.updated`, Search Indexer обновляет OpenSearch, а на шарды Content DB справочник копируется логической репликацией.
+
+**Изменение профиля**
+User Service обновляет пользователя в User DB и публикует `user.updated` → Post Service обновляет имя и аватар автора в карточках его постов в Redis.
+
+### Почему так
+
+- **Синхронно только то, что ждёт пользователь.** Всё, что можно сделать позже — рассылка поста по лентам, создание preview, обновление поискового индекса, — выполняется асинхронно через Kafka. Пользователь не ждёт, пока пост попадёт в ленты всех подписчиков, а падение одного обработчика не ломает публикацию: события дождутся его в очереди.
+- **Отдельные воркеры для фоновой работы.** Fan-out, обработка фото и индексация масштабируются независимо от сервисов, которые отвечают пользователям.
+- **Фото не проходят через сервисы.** Загрузка идёт по pre-signed URL прямо в Object Storage, а отдача — через CDN: при 6,6 ТБ фото в сутки это главная экономия сети и CPU.
+- **Database per service.** Каждый сервис владеет своими данными, поэтому сервисы можно менять и масштабировать независимо, а связи между ними явно видны на схеме.
+
+
+
+
+
 ## Исходные данные от бизнеса и аналитиков
 
 

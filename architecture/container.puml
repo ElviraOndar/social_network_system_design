@@ -1,0 +1,84 @@
+@startuml
+!include https://raw.githubusercontent.com/plantuml-stdlib/C4-PlantUML/master/C4_Container.puml
+
+title Level 2. Container diagram — социальная сеть для путешественников
+
+LAYOUT_TOP_DOWN()
+
+Person(traveler, "Путешественник")
+System_Ext(cdn, "CDN", "Отдаёт фото и аватары с ближайших к пользователю серверов")
+System_Ext(placesSource, "Внешний источник мест", "OpenStreetMap")
+
+System_Boundary(socialNetwork, "Социальная сеть для путешественников") {
+
+    Container(clientApps, "Клиентские приложения", "iOS, Android, Web SPA", "Интерфейс пользователя")
+    Container(apiGateway, "API Gateway", "Nginx", "TLS, балансировка round robin, проверка JWT, rate limiting, маршрутизация запросов по сервисам")
+
+    Container(userService, "User Service", "Go", "Регистрация, вход, выдача и обновление токенов, профили")
+    Container(postService, "Post Service", "Go", "Посты, фото, лайки, комментарии, выдача ссылок на загрузку медиа. Шардирующая библиотека: bucket = hash(user_id) % 1024")
+    Container(subscriptionService, "Subscription Service", "Go", "Подписки и отписки")
+    Container(feedService, "Feed Service", "Go", "Собирает страницу ленты: 20 id постов из ленты + карточки постов")
+    Container(placesService, "Places Service", "Go", "Поиск мест, страница места, импорт справочника, пересчёт популярности")
+
+    ContainerQueue(eventBus, "Event Bus", "Kafka", "post.created, subscription.deleted, user.updated, media.uploaded, media.processed, place.updated")
+
+    Container(fanoutWorker, "Feed Fan-out Worker", "Go", "Раскладывает новые посты по лентам подписчиков, чистит ленту при отписке")
+    Container(mediaProcessor, "Media Processor", "Go", "Создаёт preview загруженных фото")
+    Container(searchIndexer, "Search Indexer", "Go", "Обновляет поисковый индекс мест")
+
+    ContainerDb(userDb, "User DB", "PostgreSQL, master + 2 реплики", "users, refresh_tokens")
+    ContainerDb(contentDb, "Content DB", "PostgreSQL, 2 шарда × 3 копии", "posts, post_photos, media_uploads, reactions, comments + копия places")
+    ContainerDb(globalDb, "Global DB", "PostgreSQL, master + 2 реплики", "subscriptions, places")
+    ContainerDb(cache, "Cache", "Redis Cluster, 4 шарда × 2 копии", "Карточки постов, профили, лайки за 7 дней, попытки входа")
+    ContainerDb(feedDb, "Feed DB", "Cassandra, RF = 3", "feed_by_user: последние 1000 id постов на пользователя")
+    ContainerDb(searchDb, "Search Index", "OpenSearch, 1 шард × 3 копии", "places_search")
+    ContainerDb(objectStorage, "Object Storage", "S3-совместимое, RF = 3", "Оригиналы и preview фото, аватары")
+}
+
+' --- Пользователь и клиенты ---
+Rel(traveler, clientApps, "Пользуется")
+Rel(clientApps, apiGateway, "Все API-запросы", "HTTPS, REST")
+Rel(clientApps, objectStorage, "Загружает фото по pre-signed URL", "HTTPS")
+Rel(clientApps, cdn, "Загружает фото и аватары", "HTTPS")
+Rel(cdn, objectStorage, "Забирает файл при промахе кэша", "HTTPS")
+
+' --- Маршрутизация ---
+Rel(apiGateway, userService, "/users, /tokens", "REST")
+Rel(apiGateway, postService, "/posts, /media, лайки, комментарии", "REST")
+Rel(apiGateway, subscriptionService, "/users/me/subscriptions", "REST")
+Rel(apiGateway, feedService, "/feed", "REST")
+Rel(apiGateway, placesService, "/places", "REST")
+
+' --- Синхронная работа с хранилищами ---
+Rel(userService, userDb, "Пользователи и refresh-токены", "SQL")
+Rel(userService, cache, "Профили, попытки входа", "RESP")
+Rel(postService, contentDb, "Посты, лайки, комментарии — в шард автора", "SQL")
+Rel(postService, cache, "Карточки постов, лайки, last_write", "RESP")
+Rel(subscriptionService, globalDb, "Подписки", "SQL")
+Rel(feedService, feedDb, "20 id постов из ленты", "CQL")
+Rel(feedService, cache, "Карточки постов и лайки пользователя", "RESP")
+Rel(feedService, postService, "Карточки при промахе кэша", "gRPC")
+Rel(placesService, searchDb, "Поиск мест по городу и региону", "HTTP")
+Rel(placesService, globalDb, "Справочник мест, популярность", "SQL")
+Rel(placesService, placesSource, "Импорт справочника", "HTTPS")
+Rel(globalDb, contentDb, "Копия places на каждый шард", "логическая репликация")
+
+' --- Асинхронные потоки через Kafka ---
+Rel(userService, eventBus, "user.updated")
+Rel(postService, eventBus, "Публикует post.created; читает media.processed, user.updated")
+Rel(subscriptionService, eventBus, "subscription.deleted")
+Rel(placesService, eventBus, "place.updated")
+Rel(objectStorage, eventBus, "media.uploaded (уведомление о новом файле)")
+
+Rel(fanoutWorker, eventBus, "Читает post.created, subscription.deleted")
+Rel(fanoutWorker, globalDb, "Подписчики автора (с реплики)", "SQL")
+Rel(fanoutWorker, feedDb, "Добавляет пост в ленты подписчиков", "CQL")
+
+Rel(mediaProcessor, eventBus, "Читает media.uploaded, публикует media.processed")
+Rel(mediaProcessor, objectStorage, "Читает оригинал, сохраняет preview", "S3 API")
+
+Rel(searchIndexer, eventBus, "Читает place.updated")
+Rel(searchIndexer, searchDb, "Обновляет документы мест", "HTTP")
+
+SHOW_LEGEND()
+@enduml
