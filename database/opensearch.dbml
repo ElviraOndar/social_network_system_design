@@ -1,0 +1,31 @@
+// OpenSearch — поисковый индекс мест.
+// Источник истины — таблица places в PostgreSQL. Индекс обновляется асинхронно
+// (через очередь событий / CDC). DBML используется только для визуализации,
+// типы полей указаны в терминах OpenSearch mapping:
+//
+// PUT /places_search
+// {
+//   "mappings": {
+//     "properties": {
+//       "place_id":   { "type": "long" },
+//       "name":       { "type": "text", "fields": { "keyword": { "type": "keyword" } } },
+//       "city":       { "type": "text", "fields": { "keyword": { "type": "keyword" } } },
+//       "region":     { "type": "text", "fields": { "keyword": { "type": "keyword" } } },
+//       "country":    { "type": "keyword" },
+//       "location":   { "type": "geo_point" },
+//       "popularity": { "type": "long" }
+//     }
+//   }
+// }
+//
+// Запрос: multi_match по city / region / name, сортировка по popularity DESC, size = 10.
+
+Table places_search {
+  place_id long [pk, note: 'Document _id = places.id в PostgreSQL']
+  name text [not null, note: 'text + подполе name.keyword']
+  city text [note: 'text + подполе city.keyword']
+  region text [note: 'text + подполе region.keyword']
+  country keyword
+  location geo_point [note: 'Из places.latitude / places.longitude']
+  popularity long [note: 'Сортировка выдачи по убыванию']
+}

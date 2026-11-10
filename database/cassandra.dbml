@@ -1,0 +1,34 @@
+// Cassandra / ScyllaDB — Materialized Feed.
+// DBML не описывает Cassandra-специфичную схему, поэтому здесь он используется
+// только для визуализации. Реальная схема на CQL:
+//
+// CREATE TABLE feed_by_user (
+//     user_id    bigint,
+//     created_at timestamp,
+//     post_id    bigint,
+//     author_id  bigint,
+//     PRIMARY KEY ((user_id), created_at, post_id)
+// ) WITH CLUSTERING ORDER BY (created_at DESC, post_id DESC);
+//
+// Запрос страницы ленты:
+// SELECT post_id, author_id, created_at FROM feed_by_user
+// WHERE user_id = ? AND created_at < ? LIMIT 20;
+
+Table feed_by_user {
+  user_id bigint [not null, note: 'Partition key — владелец ленты']
+  created_at timestamp [not null, note: 'Clustering key, DESC — время публикации поста']
+  post_id bigint [not null, note: 'Clustering key, DESC — делает запись уникальной при совпадении created_at']
+  author_id bigint [not null, note: 'Автор поста — нужен, чтобы убрать его посты из ленты при отписке']
+
+  Indexes {
+    (user_id, created_at, post_id) [pk]
+  }
+
+  Note: '''
+  Лента заполняется по модели fan-out on write: при создании поста запись добавляется в ленту каждого подписчика автора.
+  В ленте хранятся только идентификаторы; метаданные постов достаются из PostgreSQL через кэш.
+  В каждой ленте хранятся последние 1000 записей, более старые удаляет фоновая задача.
+  При удалении поста записи из лент не удаляются: Feed Service пропускает посты,
+  которых больше нет в кэше и в PostgreSQL.
+  '''
+}
